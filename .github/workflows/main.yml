@@ -1,0 +1,215 @@
+name: K50 Building-New-test
+env:
+  TZ: Asia/Shanghai
+  CPU: 'sm8475'
+  FEIL: 'xiaomi'
+  ANDROID_VERSION: 'android12'
+  KERNEL_VERSION: '5.10'
+  KERNEL_NAME: 'xiran_StarBai-test'
+  KERNELSU_VARIANT: 'SukiSU-Ultra'
+  KERNELSU_BRANCH: 'susfs-main'
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_suffix:
+        description: '内核后缀(留空默认,开头别加连字符)'
+        required: false
+        type: string
+        default: ''
+      lz4k_enable:
+        description: '是否启用lz4k压缩'
+        required: false
+        type: boolean
+        default: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+    steps:
+      - name: 最大化建筑空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+      
+      - name: 安装配置环境依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y \
+            build-essential \
+            flex bison \
+            dwarves \
+            libssl-dev \
+            libelf-dev \
+            bc \
+            python3 \
+            python-is-python3 \
+            git \
+            make \
+            cmake \
+            zip \
+            curl \
+            wget \
+            gnupg \
+            gcc-multilib \
+            g++-multilib \
+            ccache \
+            rsync \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabihf \
+            neofetch
+          lscpu
+          neofetch
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-platform-13.0.0_r34/clang-r450784d.tar.gz
+          mkdir -p aosp-clang
+          tar -xzf clang-r450784d.tar.gz -C aosp-clang
+          rm clang-r450784d.tar.gz
+          echo "AOSP_CLANG_PATH=$(pwd)/aosp-clang" >> $GITHUB_ENV
+          echo "PATH=$(pwd)/aosp-clang/bin:$PATH" >> $GITHUB_ENV
+      - name: 初始化源码仓库
+        run: |
+          rm -rf kernel_workspace && mkdir kernel_workspace && cd kernel_workspace
+          git clone --depth=1 https://github.com/ciallo-0d00721/android_kernel_xiaomi_diting.git -b test common
+          rm common/android/abi_gki_protected_exports_* || true
+      
+      - name: 添加 SukiSU-Ultra
+        id: ksu_version
+        run: |
+          cd kernel_workspace
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+          cd ./KernelSU
+          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10700)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          export KSU_VERSION=$KSU_VERSION
+          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=$KSU_VERSION/" kernel/Makefile
+      
+      - name: 添加 SukiSU-Ultra 配置项
+        run: |
+          cd kernel_workspace
+          cd common
+          echo "CONFIG_KALLSYMS=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KALLSYMS_ALL=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./arch/arm64/configs/gki_defconfig
+          sed -i 's/check_defconfig//' ./build.config.gki
+      
+      - name: 添加制作名称
+        run: |
+          cd kernel_workspace
+          cd common
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            for f in ./arch/arm64/configs/gki_defconfig; do
+              sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-${{ github.event.inputs.kernel_suffix }}\"/" "$f"
+            done
+          fi
+      
+      - name: 构建内核
+        continue-on-error: true
+        run: |
+          cd kernel_workspace
+          cd common
+          
+          export ARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH=$AOSP_CLANG_PATH/bin:$PATH
+          export LLVM=1
+          export LLVM_IAS=0
+          export KCFLAGS="-Wno-error -Wno-deprecated-declarations"
+          export KBUILD_BUILD_VERSION="0"
+          export SOURCE_DATE_EPOCH=$(date +%s)
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC="clang" BUILD_CONFIG=build.config.gki.aarch64 O=out DEPMOD=depmod gki_defconfig && \
+          scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO && \
+          make -j24 O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
+      
+      - name: 克隆 AnyKernel3 并打包
+        run: |
+          cd kernel_workspace
+          cd common
+          git clone https://github.com/Winkmoon/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          cd AnyKernel3
+          cp ../out/arch/arm64/boot/Image ./Image
+          if [ ! -f ./Image ]; then
+            exit 1
+          fi
+          if [[ ${{ github.event.inputs.lz4k_enable }} == "true" ]]; then
+            wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8650/refs/heads/main/zram.zip
+            unzip zram.zip -d ./
+          fi
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            zip -r ../AnyKernel3_SukiSU_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A11_${{ github.event.inputs.kernel_suffix }}.zip ./*
+          else
+            zip -r ../AnyKernel3_SukiSU_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A11_${{ env.KERNEL_NAME }}.zip ./*
+          fi
+      
+      - name: 上传 ZIP 工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel_ZIP_Artifacts
+          path: ${{ github.workspace }}/kernel_workspace/common/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+      
+    steps:
+      - name: 下载 ZIP 工件
+        uses: actions/download-artifact@v4
+        with:
+          name: Kernel_ZIP_Artifacts
+          path: ./release_zips
+      
+      - name: 设置环境变量
+        run: |
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            FULL_VERSION=${{ format('{0}.259-{1}', env.KERNEL_VERSION, github.event.inputs.kernel_suffix) }}
+            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+          else
+            FULL_VERSION=${{ format('{0}.259-{1}', env.KERNEL_VERSION, env.KERNEL_NAME) }}
+            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+          fi
+          TIME="$(TZ='Asia/Shanghai' date +'%y%m%d%H%M%S')"
+          TIME_FORM="$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+          echo "TIME=$TIME" >> $GITHUB_ENV
+          echo "TIME_FORM=$TIME_FORM" >> $GITHUB_ENV
+          TAG_HEAD="XiaoMi11Pro-Kernel-build"
+          echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
+      
+      - name: 创建发布
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "${{ env.TAG_HEAD }}-${{ env.TIME }}"
+          name: "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}"
+          body: |
+            ### 📱 k50 SukiSU-Ultra 8+gen1 内核 | 构建信息
+            - 内核版本号: ${{ env.FULL_VERSION }}
+            - 编译时间: ${{ env.TIME_FORM }}
+            - Android 版本: ${{ env.ANDROID_VERSION }}
+            - 特性：SukiSU Ultra v${{ needs.build.outputs.ksuver }}
+            - SukiSU管理器下载：[SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra/releases)
+            ### ⏫️ 更新内容：
+            - 更新SukiSU Ultra至最新版本
+            - 优化内核构建流程
+            ### 📋 安装方法
+            1. 通过TWRP等Recovery刷入
+            2. 使用Kernel Flasher工具刷入
+            3. 通过SukiSU管理器直接安装
+            #### ※※※刷机前请务必备份重要数据※※※
+          draft: false
+          prerelease: false
+          files: |
+            release_zips/AnyKernel3_*.zip
