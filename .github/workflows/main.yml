@@ -75,7 +75,7 @@ jobs:
       - name: 初始化源码仓库
         run: |
           rm -rf kernel_workspace && mkdir kernel_workspace && cd kernel_workspace
-          git clone --depth=1 https://github.com/ciallo-0d00721/android_kernel_xiaomi_diting.git -b test common
+          git clone --depth=1 https://github.com/Winkmoon/xinran-ztc-kernel-5.10.git -b master common
           rm common/android/abi_gki_protected_exports_* || true
       
       - name: 添加 SukiSU-Ultra
